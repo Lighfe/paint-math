@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "criteria", "tests", "verified_sha"],
+  "properties": {
+    "verdict": {"enum": ["pass", "fail"]},
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "verdict", "evidence"],
+        "properties": {
+          "id": {"type": "integer"},
+          "verdict": {"enum": ["pass", "fail", "invalid"]},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "result"],
+      "properties": {"command": {"type": "string"}, "result": {"type": "string"}}
+    },
+    "verified_sha": {"type": "string"}
+  }
+}

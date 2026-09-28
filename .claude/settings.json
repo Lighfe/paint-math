@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(scripts/qa-codex ROLE=qa ISSUE=*)",
+      "Bash(gh issue close *)"
+    ],
+    "deny": [
+      "Edit(/.claude/settings*.json)",
+      "Write(/.claude/settings*.json)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Bash|SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.py\" || { echo 'guard hook failed: call denied' >&2; exit 2; }",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "Agent|Bash|SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"$CLAUDE_PROJECT_DIR/.claude/hooks/not_started.py\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]  
+  }
+}
