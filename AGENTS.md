@@ -1,6 +1,6 @@
 # paint-math
 
-paint-math is a web app: the user enters an equation and a canvas draws its curve.
+paint-math is a demo project for testing agent-graph-kit. The product is a web-based paint tool with a mathematical basis: brushes lay down paint with random distributions, paint behaves more like real paint than flat pixels, and the user can "throw" a dynamical system into a selected area of the canvas. Later it could become a low-code tool, or take AI prompts to pick and set up the dynamical system.
 The frontend is the `frontend/` submodule, built by Lovable. Hooks in `.claude/hooks/` check the handoff calls (see `docs/process.md`).
 
 Lovable project: 68a854ba-5bd5-4a8f-a15e-2d90bd84f103
