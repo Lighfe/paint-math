@@ -299,27 +299,55 @@ def _has_frontend_submodule(worktree: Path) -> bool:
     return any(line.split(" ", 1)[-1].strip() == "frontend" for line in p.stdout.splitlines())
 
 
+# The install command follows the lockfile in `frontend/` (#58): an npm lockfile wins over a bun one.
+NPM_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
+BUN_LOCKFILES = ("bun.lock", "bun.lockb")
+NPM_INSTALL = ["npm", "ci"]
+BUN_INSTALL = ["bun", "install", "--frozen-lockfile"]
+PLAYWRIGHT_INSTALL = ["npx", "playwright", "install", "chromium"]
+
+
+def install_command(frontend: Path) -> tuple[list[str] | None, str]:
+    """The install command for the checked-out `frontend/`: (command, "") or (None, the reason for
+    `## QA: UNAVAILABLE`). A fixed rule, no LLM decision (spec 6.1)."""
+    if any((frontend / name).is_file() for name in NPM_LOCKFILES):
+        return NPM_INSTALL, ""
+    if any((frontend / name).is_file() for name in BUN_LOCKFILES):
+        if shutil.which("bun") is None:
+            return None, "pre-step: `frontend/` has a bun lockfile, but `bun` is not on PATH"
+        return BUN_INSTALL, ""
+    names = ", ".join(f"`{name}`" for name in NPM_LOCKFILES + BUN_LOCKFILES)
+    return None, f"pre-step: `frontend/` has none of the lockfiles {names}, so no install command is known"
+
+
 def pre_step(worktree: Path, timeout_s: int, uv_cache: Path | None = None) -> str | None:
     """Spec 6.1 step 3, outside the sandbox. None on success (or nothing to do), else the reason.
-    With a frontend: the submodule, `npm ci` and the browser. With `uv_cache` (uv is on PATH):
-    fill that cache with pytest for the test command in the sandbox, with `UV_FILL` run in the run
-    temp folder (the parent of the worktree), not in the worktree. The fill does not discover, read
-    or build the reviewed project or its uv config, so that code runs only in the sandbox."""
-    steps: list[tuple[str, list[str], Path, dict | None]] = []
+    With a frontend: the submodule, then the install command that the lockfile in `frontend/`
+    names (`npm ci` or `bun install --frozen-lockfile`), then the browser. With `uv_cache` (uv is
+    on PATH): fill that cache with pytest for the test command in the sandbox, with `UV_FILL` run in
+    the run temp folder (the parent of the worktree), not in the worktree. The fill does not
+    discover, read or build the reviewed project or its uv config, so that code runs only in the
+    sandbox."""
+
+    def step(cmd: list[str], cwd: Path, env: dict | None = None, label: str | None = None) -> str | None:
+        error = _run_step(cmd, cwd, timeout_s, env)
+        return None if error is None else f"pre-step `{label or ' '.join(cmd)}` failed: {error}"
+
     if _has_frontend_submodule(worktree):
         frontend = worktree / "frontend"
-        steps += [
-            ("git submodule update --init frontend",
-             ["git", "-C", str(worktree), "submodule", "update", "--init", "--", "frontend"], worktree, None),
-            ("npm ci", ["npm", "ci"], frontend, None),
-            ("npx playwright install chromium", ["npx", "playwright", "install", "chromium"], frontend, None),
-        ]
-    if uv_cache is not None:
-        steps.append((" ".join(UV_FILL), UV_FILL, worktree.parent, {**os.environ, "UV_CACHE_DIR": str(uv_cache)}))
-    for label, cmd, cwd, env in steps:
-        error = _run_step(cmd, cwd, timeout_s, env)
+        error = step(["git", "-C", str(worktree), "submodule", "update", "--init", "--", "frontend"], worktree,
+                     label="git submodule update --init frontend")
         if error is not None:
-            return f"pre-step `{label}` failed: {error}"
+            return error
+        install, reason = install_command(frontend)  # checked in the updated checkout
+        if install is None:
+            return reason
+        for cmd in (install, PLAYWRIGHT_INSTALL):
+            error = step(cmd, frontend)
+            if error is not None:
+                return error
+    if uv_cache is not None:
+        return step(UV_FILL, worktree.parent, {**os.environ, "UV_CACHE_DIR": str(uv_cache)})
     return None
 
 
