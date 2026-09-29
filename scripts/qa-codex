@@ -304,26 +304,54 @@ NPM_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
 BUN_LOCKFILES = ("bun.lock", "bun.lockb")
 NPM_INSTALL = ["npm", "ci"]
 BUN_INSTALL = ["bun", "install", "--frozen-lockfile"]
-PLAYWRIGHT_INSTALL = ["npx", "playwright", "install", "chromium"]
+# The browser step (#59) runs the Playwright CLI of the frontend's own dependency, through the
+# package manager of the lockfile. `--no` / `--no-install` refuse a registry fetch when it is not
+# installed, so the browser version follows the frontend's lockfile.
+NPX_BROWSER = ["npx", "--no", "playwright", "install", "chromium"]
+BUN_BROWSER = ["bun", "x", "--no-install", "playwright", "install", "chromium"]
+PLAYWRIGHT_PACKAGES = ("playwright", "@playwright/test")
+PLAYWRIGHT_FIELDS = ("dependencies", "devDependencies")
 
 
-def install_command(frontend: Path) -> tuple[list[str] | None, str]:
-    """The install command for the checked-out `frontend/`: (command, "") or (None, the reason for
-    `## QA: UNAVAILABLE`). A fixed rule, no LLM decision (spec 6.1)."""
+def install_command(frontend: Path) -> tuple[list[str] | None, list[str] | None, str]:
+    """The install command and the browser step for the checked-out `frontend/`: (install, browser, "")
+    or (None, None, the reason for `## QA: UNAVAILABLE`). A fixed rule, no LLM decision (spec 6.1)."""
     if any((frontend / name).is_file() for name in NPM_LOCKFILES):
-        return NPM_INSTALL, ""
+        return NPM_INSTALL, NPX_BROWSER, ""
     if any((frontend / name).is_file() for name in BUN_LOCKFILES):
         if shutil.which("bun") is None:
-            return None, "pre-step: `frontend/` has a bun lockfile, but `bun` is not on PATH"
-        return BUN_INSTALL, ""
+            return None, None, "pre-step: `frontend/` has a bun lockfile, but `bun` is not on PATH"
+        return BUN_INSTALL, BUN_BROWSER, ""
     names = ", ".join(f"`{name}`" for name in NPM_LOCKFILES + BUN_LOCKFILES)
-    return None, f"pre-step: `frontend/` has none of the lockfiles {names}, so no install command is known"
+    return None, None, f"pre-step: `frontend/` has none of the lockfiles {names}, so no install command is known"
+
+
+def playwright_dependency(frontend: Path) -> str | None:
+    """None when `frontend/package.json` lists `playwright` or `@playwright/test` as a key in
+    `dependencies` or `devDependencies`, else the reason for `## QA: UNAVAILABLE` (#59)."""
+    path = frontend / "package.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "pre-step: `frontend/package.json` is missing"
+    except (OSError, ValueError) as e:  # ValueError covers JSON and UTF-8 errors
+        return codex_exec._one_line(f"pre-step: `frontend/package.json` cannot be read as JSON: {e}")
+    if not isinstance(data, dict):
+        return "pre-step: `frontend/package.json` is not a JSON object"
+    for field in PLAYWRIGHT_FIELDS:
+        deps = data.get(field)
+        if isinstance(deps, dict) and any(name in deps for name in PLAYWRIGHT_PACKAGES):
+            return None
+    return ("pre-step: `frontend/package.json` has no Playwright dependency "
+            "(`playwright` or `@playwright/test` in `dependencies` or `devDependencies`)")
 
 
 def pre_step(worktree: Path, timeout_s: int, uv_cache: Path | None = None) -> str | None:
     """Spec 6.1 step 3, outside the sandbox. None on success (or nothing to do), else the reason.
     With a frontend: the submodule, then the install command that the lockfile in `frontend/`
-    names (`npm ci` or `bun install --frozen-lockfile`), then the browser. With `uv_cache` (uv is
+    names (`npm ci` or `bun install --frozen-lockfile`), after a check that `frontend/package.json`
+    has a Playwright dependency, then the browser with that dependency's CLI through the same
+    package manager (`NPX_BROWSER` or `BUN_BROWSER`). With `uv_cache` (uv is
     on PATH): fill that cache with pytest for the test command in the sandbox, with `UV_FILL` run in
     the run temp folder (the parent of the worktree), not in the worktree. The fill does not
     discover, read or build the reviewed project or its uv config, so that code runs only in the
@@ -339,10 +367,13 @@ def pre_step(worktree: Path, timeout_s: int, uv_cache: Path | None = None) -> st
                      label="git submodule update --init frontend")
         if error is not None:
             return error
-        install, reason = install_command(frontend)  # checked in the updated checkout
+        install, browser, reason = install_command(frontend)  # checked in the updated checkout
         if install is None:
             return reason
-        for cmd in (install, PLAYWRIGHT_INSTALL):
+        reason = playwright_dependency(frontend)  # the recorded commit, before any install
+        if reason is not None:
+            return reason
+        for cmd in (install, browser):
             error = step(cmd, frontend)
             if error is not None:
                 return error
