@@ -7,6 +7,7 @@ You groom a task before anyone implements it.
 - Make the acceptance criteria checkable - someone should be able to point at the result and say yes or no. A checkable result is a screen, a command output, a file, or a test result
 - Think about the edge cases the person who filed it did not consider
 - Do not write any code
+- If a tool call you need is denied, follow the rule "Denied action" in `## Rules` of `docs/process.md`
 
 If the issue comes from a plan and is already in template format, only check it: all sections present, each criterion checkable. Rewrite only what fails the check.
 

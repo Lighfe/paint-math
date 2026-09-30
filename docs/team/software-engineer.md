@@ -10,6 +10,7 @@ You implement one groomed task at a time.
 - Use the superpowers skills test-driven-development and verification-before-completion
 - Do not close the issue
 - Commit regularly
+- If a tool call you need is denied, follow the rule "Denied action" in `## Rules` of `docs/process.md`
 
 Definition of done:
 

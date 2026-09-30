@@ -19,6 +19,8 @@ MARKERS: dict[str, tuple[str, ...]] = {
     "qa": ("## QA: PASS", "## QA: FAIL", "## QA: UNAVAILABLE", "## QA: INVALID", "## QA: UNVERIFIABLE"),
 }
 RESUME = "## Owner: RESUME"
+# The only authorAssociation whose comments count (issue #70). Organization-owned repos are not supported yet.
+OWNER = "OWNER"
 AGENT_LANE = {"default": "software-engineer", "frontend": "frontend-engineer"}
 
 GROOMED, NEEDS_OWNER, WAITING = MARKERS["pm"]
@@ -79,7 +81,9 @@ class Call:
 
 
 def _comment_bodies(data: dict) -> tuple[str, ...]:
-    """The comment bodies, or ValueError when the comment data is missing or malformed."""
+    """The bodies of the comments the repo owner wrote (authorAssociation exactly OWNER), oldest
+    first, or ValueError when the comment data is missing or malformed. Every comment is checked,
+    also the ones that are dropped: missing author data must not look like a stranger's comment."""
     comments = data.get("comments")
     if not isinstance(comments, list):
         raise ValueError(f"issue JSON has no comments list (got {type(comments).__name__})")
@@ -87,16 +91,25 @@ def _comment_bodies(data: dict) -> tuple[str, ...]:
     for n, c in enumerate(comments):
         if not isinstance(c, dict) or not isinstance(c.get("body"), str):
             raise ValueError(f"issue JSON comment {n} has no string body")
-        bodies.append(c["body"])
+        association = c.get("authorAssociation")
+        if not isinstance(association, str):
+            raise ValueError(f"issue JSON comment {n} has no string authorAssociation "
+                             f"(got {type(association).__name__})")
+        if association == OWNER:
+            bodies.append(c["body"])
     return tuple(bodies)
 
 
 def parse_issue(data: dict) -> Issue:
     """Build an Issue from `gh issue view N --json number,state,labels,body,comments`.
 
+    Only comments whose `authorAssociation` is exactly OWNER count (issue #70): in a public
+    repo anyone can comment, and a stranger's marker must not resume, pass, block, void a
+    receipt or close an issue. Other comments are left out of `Issue.comments`.
+
     Raises ValueError when `comments` is missing, not a list, or has an element
-    without a string `body`: missing comment data must not look like an issue
-    without comments.
+    without a string `body` or a string `authorAssociation`: missing comment data
+    must not look like an issue without comments.
     """
     return Issue(
         number=int(data["number"]),

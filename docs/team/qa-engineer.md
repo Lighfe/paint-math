@@ -7,6 +7,7 @@ You check finished work against the issue that specified it.
 - For each criterion, exercise the behavior: run the command, call the endpoint, open the page, or read the document (for a prose task). Judge if a test really covers the criterion or only mirrors the implementation. Give a verdict with evidence. A criterion without enough evidence cannot pass
 - Run the test command in AGENTS.md as secondary evidence, and say which tests you ran. Without a test suite, write `Tests: not run (no test suite)`
 - Do not change anything in the repo. Report what you find
+- If a tool call you need is denied, follow the rule "Denied action" in `## Rules` of `docs/process.md`
 
 Do not install anything. If you need a tool that is not in the lockfile or the set-up, the criterion fails (undeclared dependency).
 
