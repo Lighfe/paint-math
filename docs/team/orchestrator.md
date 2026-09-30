@@ -12,13 +12,15 @@ You are the main session. You coordinate the work on the issues. You follow the 
 
 Run `git status --porcelain`. The output must be empty. If it is not empty, stop the whole loop and ask the owner. Do not commit, stash or discard the changes.
 
+Then free the waiting issues, before every pick, also before you decide that no `ready` issue is left. List them with `gh issue list --state open --label waiting --json number --jq '.[].number'`. For each, read the `Waiting on: #<N>` line of the newest `## PM: ` comment (see "Read the result") and the blocker's state with `gh issue view <N> --json state --jq .state`. If it is `CLOSED`, remove `waiting` and add `ready`. If the line or the state cannot be read, escalate the waiting issue and remove `waiting`.
+
 ## Launch a subagent
 
 Launch a new subagent for each step. Each subagent starts with a fresh context. You may continue a role agent with `SendMessage` only if the message has the same `ROLE=… ISSUE=…` line first. Without it the hook denies the call.
 
 | Step | Agent | Input |
 |---|---|---|
-| Groom | `pm` | The issue number. After `## Engineer: BLOCKED` or `## QA: UNVERIFIABLE`: also the URL of that comment |
+| Groom | `pm` | The issue number. After `## Engineer: BLOCKED`, `## QA: UNVERIFIABLE`, or `## PM: WAITING` whose blocker is closed: also the URL of that comment |
 | Implement | `software-engineer` for `Lane: default`, `frontend-engineer` for `Lane: frontend` | The issue number. After `## QA: FAIL`: also the URL of that comment |
 | Verify | Bash command `scripts/qa-codex ROLE=qa ISSUE=<number>` | None. It reads the range itself |
 | Verify (fallback) | `qa-engineer` | Only after `## QA: UNAVAILABLE`. The issue number and the commit range `<base>..<head>` from the newest `## Engineer: DONE` comment. Do not give QA the engineer summary |
@@ -40,7 +42,7 @@ Each role posts a comment with a fixed first line:
 
 | Role | First line |
 |---|---|
-| PM | `## PM: GROOMED` or `## PM: NEEDS OWNER` |
+| PM | `## PM: GROOMED`, `## PM: NEEDS OWNER` or `## PM: WAITING` |
 | Engineer | `## Engineer: DONE` or `## Engineer: BLOCKED` |
 | QA | `## QA: PASS`, `## QA: FAIL`, `## QA: UNVERIFIABLE`, `## QA: UNAVAILABLE` or `## QA: INVALID` |
 
@@ -54,7 +56,7 @@ gh issue view <number> --json comments --jq '[.comments[] | {line: (.body | spli
 
 Use `## PM: `, `## Engineer: ` or `## QA: ` as the prefix. The line must be exactly one of the values in the table.
 
-Read the full comment only for `## QA: FAIL`, `## QA: UNVERIFIABLE`, `## Engineer: BLOCKED` and `## Engineer: DONE` (for the commit range). Replace `last` in the command with `last | .body`.
+Read the full comment only for `## PM: WAITING` (for the `Waiting on:` line), `## QA: FAIL`, `## QA: UNVERIFIABLE`, `## Engineer: BLOCKED` and `## Engineer: DONE` (for the commit range). Replace `last` in the command with `last | .body`.
 
 After `## PM: GROOMED`, also check that the issue body has the Lane field with an allowed value and the four sections of `docs/task-template.md`.
 
@@ -66,6 +68,7 @@ If the result is missing or not in this format, do not guess. Escalate the issue
 |---|---|---|
 | PM | `## PM: GROOMED` | Launch the engineer |
 | PM | `## PM: NEEDS OWNER` | Escalate the issue |
+| PM | `## PM: WAITING` | If the comment has exactly one `Waiting on: #<N>` line naming another issue of this repo and that issue is open: remove `ready`, add `waiting`, and continue with the next issue, with no owner comment. Otherwise (line missing, own number, blocker already closed or not readable): escalate the issue |
 | Engineer | `## Engineer: DONE` | Launch QA |
 | Engineer | `## Engineer: BLOCKED` | Send back: launch the PM with the engineer comment (the hook denies at 3 returns) |
 | QA | `## QA: PASS` | Close the issue |
@@ -78,16 +81,18 @@ If the result is missing or not in this format, do not guess. Escalate the issue
 
 A hook checks each launch, each `SendMessage` continuation, `qa-codex` and `gh issue close`. When it allows a launch, it posts `## Launch: <role> (attempt <n>)` on the issue. When it denies a call, the deny message names the failed check (`G1` … `G8`) and what is missing. The deny message is the source of truth.
 
-The hook comments are `## Launch: …` and `## Launch not started: …`. They are not results.
+The hook comments are `## Launch: …`, `## Launch not started: …` and `## Launch stopped by outage: …`. They are not results.
 
-The issue is pending when the last launched role ended without a result. Escalate the issue, as before. This also holds when the role started and then could not act.
+The issue is pending when the last launched role ended without a result. Escalate the issue, as before. This also holds when the role started and then could not act, unless a hook marked its receipt as stopped by an outage (see below).
 
 When auto mode denies a launch, the `qa-codex` call or a `SendMessage` continuation before it runs, a second hook posts `## Launch not started: <role> (…)` for that receipt. The launch never happened: launch the same step again. This is not a return.
+
+When a role agent ended and a hook posted `## Launch stopped by outage: <role> (…)` on its receipt, an auto mode outage stopped it: launch the same step again. This is not a return.
 
 What to do with a deny:
 
 - `G1` pending: escalate the issue
-- `G1 … the last 2 launches did not start`: stop the loop and ask the owner. Claude Code is denying the calls; the issue itself is fine
+- `G1 … the last 2 launches` (did not start or were stopped by an outage): stop the loop and ask the owner. Claude Code is denying the calls; the issue itself is fine
 - `G1` working tree not clean: stop the loop and ask the owner
 - `G1` command not in one of the two exact forms: rewrite the call in the exact form, or use the way around that the deny message names (a comment body from a file with `--body-file`, a commit message with `git commit -F`). This is not a return
 - `G6` verified SHA is not `HEAD`: run `qa-codex` again. This is not a return
@@ -124,4 +129,4 @@ For an escalated issue:
 For the whole loop:
 
 - `gh issue list --state open --label ready --search "-label:later -label:needs-owner"` shows no issue, or the loop stopped because `git status --porcelain` was not empty
-- Your final message lists the closed issues, the escalated issues with the reason, and the reason if the loop stopped early
+- Your final message lists the closed issues, the escalated issues with the reason, the issues still waiting with their blocker, and the reason if the loop stopped early

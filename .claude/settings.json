@@ -22,6 +22,17 @@
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"$CLAUDE_PROJECT_DIR/.claude/hooks/outage_stop.py\" || true",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
     "PermissionDenied": [
       {
         "matcher": "Agent|Bash|SendMessage",

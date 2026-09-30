@@ -31,6 +31,7 @@ the prescribed ones (`gh api`, `gh issue edit --state closed`) are not checked.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import json
 import os
@@ -654,10 +655,16 @@ def event_call_hash(event: dict) -> str | None:
     return issue_state.call_hash(tool_use_id) if isinstance(tool_use_id, str) else None
 
 
-def decide(event: dict, read_facts, post_comment, lock=contextlib.nullcontext) -> str | None:
+def _no_blocker_reader(number: int) -> bool:
+    raise Deny(f"guard error: no reader for the state of blocker #{number}")
+
+
+def decide(event: dict, read_facts, post_comment, lock=contextlib.nullcontext,
+           read_blocker=_no_blocker_reader) -> str | None:
     """Deny reason, or None to let the call through. `lock()` is held from reading
     the facts until the launch comment is posted (spec 5.7). The launch comment has a
-    `Call:` line when the event has a string tool_use_id (spec 5.3)."""
+    `Call:` line when the event has a string tool_use_id (spec 5.3). For a PM call after
+    `## PM: WAITING`, `read_blocker(n)` (True = open) reads the blocker inside the lock."""
     try:
         call = classify(event)
     except Deny as e:
@@ -666,6 +673,9 @@ def decide(event: dict, read_facts, post_comment, lock=contextlib.nullcontext) -
         return None
     with lock():
         facts = read_facts(call.issue)
+        blocker = issue_state.blocker_to_read(call, facts)
+        if blocker is not None:
+            facts = dataclasses.replace(facts, blocker_open=read_blocker(blocker))
         reason = issue_state.check(call, facts)
         if reason:
             return reason
@@ -722,6 +732,16 @@ class _IO:
                                     "number,state,labels,body,comments"]))
         return issue_state.parse_issue(data)
 
+    def read_blocker(self, number: int) -> bool:
+        """True when issue `number` is open, False when it is closed; anything else denies."""
+        try:
+            state = json.loads(self.run(["gh", "issue", "view", str(number), "--json", "state"]))["state"]
+        except (ValueError, KeyError, TypeError):
+            state = None
+        if state not in ("OPEN", "CLOSED"):
+            raise Deny(f"guard error: gh issue view {number} --json state gave no state OPEN or CLOSED")
+        return state == "OPEN"
+
     def read_facts(self, number: int) -> issue_state.Facts:
         iss = self.read_issue(number)
         head = self.run(["git", "rev-parse", "HEAD"]).strip()
@@ -731,12 +751,15 @@ class _IO:
     def post_comment(self, number: int, body: str) -> None:
         self.run(["gh", "issue", "comment", str(number), "--body-file", "-"], stdin=body)
 
-    @contextlib.contextmanager
-    def lock(self):
+    def git_dir(self) -> Path:
         git_dir = self.run(["git", "rev-parse", "--git-dir"]).strip()
         if not git_dir:
             raise Deny("guard error: git rev-parse --git-dir printed nothing")
-        fd = os.open(Path(git_dir) / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+        return Path(git_dir)
+
+    @contextlib.contextmanager
+    def lock(self):
+        fd = os.open(self.git_dir() / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             while True:
                 try:
@@ -789,7 +812,8 @@ def main(stdin=sys.stdin, stdout=sys.stdout) -> int:
                 event = json.load(stdin)
             except ValueError as e:
                 raise Deny(f"guard error: the hook input is not valid JSON ({_first_line(str(e))})") from None
-            reason = decide(event, io.read_facts, io.post_comment, lock=io.lock)
+            reason = decide(event, io.read_facts, io.post_comment, lock=io.lock,
+                            read_blocker=io.read_blocker)
     except Deny as e:
         reason = str(e)
     except BaseException as e:  # a crash must never let the call through

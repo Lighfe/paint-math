@@ -14,14 +14,14 @@ from dataclasses import dataclass
 
 # role -> result markers (spec 5.5)
 MARKERS: dict[str, tuple[str, ...]] = {
-    "pm": ("## PM: GROOMED", "## PM: NEEDS OWNER"),
+    "pm": ("## PM: GROOMED", "## PM: NEEDS OWNER", "## PM: WAITING"),
     "engineer": ("## Engineer: DONE", "## Engineer: BLOCKED"),
     "qa": ("## QA: PASS", "## QA: FAIL", "## QA: UNAVAILABLE", "## QA: INVALID", "## QA: UNVERIFIABLE"),
 }
 RESUME = "## Owner: RESUME"
 AGENT_LANE = {"default": "software-engineer", "frontend": "frontend-engineer"}
 
-GROOMED, NEEDS_OWNER = MARKERS["pm"]
+GROOMED, NEEDS_OWNER, WAITING = MARKERS["pm"]
 DONE, BLOCKED = MARKERS["engineer"]
 PASS, FAIL, UNAVAILABLE, INVALID, UNVERIFIABLE = MARKERS["qa"]
 # A return sends the issue back (spec 5.4 G7): FAIL and BLOCKED, and UNVERIFIABLE (a limit of the
@@ -33,6 +33,13 @@ MAX_RETURNS = 3
 LAUNCH = re.compile(r"^## Launch: (pm|engineer|qa) \((?:attempt|continued, round) (\d+)\)$")
 # A receipt that Claude Code denied before the launch ran (PermissionDenied hook, spec 5.3)
 NOT_STARTED = re.compile(r"^## Launch not started: ((?:pm|engineer|qa) \((?:attempt|continued, round) \d+\))$")
+# A receipt whose agent started, was stopped by an auto mode outage and ended without a result
+# (SubagentStop hook, spec 5.3). It voids its receipt exactly like a not-started comment.
+STOPPED = re.compile(r"^## Launch stopped by outage: ((?:pm|engineer|qa) \((?:attempt|continued, round) \d+\))$")
+# First-line prefixes of a denial without a classifier verdict (Claude Code 2.1.284, spec 5.3)
+NO_VERDICT_REASONS = ("Classifier unavailable",
+                      "Auto mode could not evaluate this action and is blocking it for safety",
+                      "Auto mode unavailable")
 _RECEIPT_KEY = re.compile(r"^## Launch: ((?:pm|engineer|qa) \((?:attempt|continued, round) \d+\))$")
 _CALL = re.compile(r"^Call: (\S+)$")
 CALL_HASH_LEN = 12
@@ -40,6 +47,7 @@ REASON_MAX = 200
 _LANE = re.compile(r"^Lane: (\S+)$")
 _VERIFIED = re.compile(r"^Verified: (\S+)$")
 _COMMITS = re.compile(r"^Commits: (\S+?)\.\.(\S+)$")
+_WAITING_ON = re.compile(r"^Waiting on: #([1-9][0-9]*)$")
 
 
 @dataclass(frozen=True)
@@ -56,6 +64,7 @@ class Facts:
     issue: Issue
     head: str  # full SHA of HEAD
     clean: bool  # git status --porcelain is empty
+    blocker_open: bool | None = None  # state of the Waiting on: issue, read only when blocker_to_read asks
 
 
 @dataclass(frozen=True)
@@ -100,6 +109,11 @@ def parse_issue(data: dict) -> Issue:
 
 def first_line(body: str) -> str:
     return body.split("\n", 1)[0].rstrip()
+
+
+def evidence_line(reason: str) -> str:
+    """The first line of a reason as is (trailing whitespace kept), cut to REASON_MAX characters."""
+    return reason.split("\n", 1)[0][:REASON_MAX]
 
 
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -151,6 +165,12 @@ def commits_range(body: str) -> tuple[str, str] | None:
     return (m[0], m[1]) if m else None
 
 
+def waiting_on(body: str) -> int | None:
+    """The issue number of the Waiting on: line, or None when it is missing or lines disagree."""
+    m = _value(body, _WAITING_ON)
+    return int(m[0]) if m else None
+
+
 # --- validity, pending, current result (spec 5.3) --------------------------------
 
 
@@ -164,12 +184,18 @@ def _call_value(body: str) -> str | None:
     return m[0] if m else None
 
 
+def is_no_verdict(reason) -> bool:
+    """True when the first line of a denial reason starts with one of the no-verdict texts."""
+    return isinstance(reason, str) and first_line(reason).startswith(NO_VERDICT_REASONS)
+
+
 def _not_started(issue: Issue) -> set[int]:
-    """Indexes of the receipts that are not started: a later not-started comment has the same
-    `<role> (…)` part and the same Call: value. A receipt without a Call: line is never not started."""
-    marks = []  # (index, key, call) of the not-started comments
+    """Indexes of the voided receipts: a later not-started or stopped-by-outage comment has the
+    same `<role> (…)` part and the same Call: value. A receipt without a Call: line is never voided."""
+    marks = []  # (index, key, call) of the not-started and stop comments
     for j, body in enumerate(issue.comments):
-        m = NOT_STARTED.match(first_line(body))
+        line = first_line(body)
+        m = NOT_STARTED.match(line) or STOPPED.match(line)
         if m and (value := _call_value(body)):
             marks.append((j, m.group(1), value))
     voided = set()
@@ -262,13 +288,17 @@ def launch_comment(call: Call, attempt: int, call_hash: str | None = None) -> st
     return f"{text}\nCall: {call_hash}" if call_hash else text
 
 
-def not_started_comment(issue: Issue, call_hash: str, reason: str, role: str | None = None) -> str | None:
-    """The not-started comment for the newest receipt, or None when it must not be posted:
-    the newest receipt has no Call: line equal to call_hash (or another role than `role`),
-    has a result of its role or a RESUME after it, or is already not started."""
+def _void_comment(issue: Issue, head: str, role: str | None, reason: str,
+                  call_hash: str | None = None, verbatim: bool = False) -> str | None:
+    """`head` for the newest receipt, or None when the newest receipt has no Call: line (or not one
+    equal to call_hash), has another role than `role`, has a result of its role or a RESUME after
+    it, or is already voided."""
     raw = _raw_lines(issue)
     j = _newest_launch(raw)
-    if j is None or j in _not_started(issue) or _call_value(issue.comments[j]) != call_hash:
+    if j is None or j in _not_started(issue):
+        return None
+    value = _call_value(issue.comments[j])
+    if value is None or (call_hash is not None and value != call_hash):
         return None
     receipt_role = _launch_role(raw[j])
     if role is not None and receipt_role != role:
@@ -276,11 +306,28 @@ def not_started_comment(issue: Issue, call_hash: str, reason: str, role: str | N
     if any(line == RESUME or _result_role(line) == receipt_role for line in raw[j + 1:]):
         return None
     key = raw[j][len("## Launch: "):]
-    return f"## Launch not started: {key}\nCall: {call_hash}\nReason: {first_line(reason)[:REASON_MAX]}"
+    text = evidence_line(reason) if verbatim else first_line(reason)[:REASON_MAX]
+    return f"{head} {key}\nCall: {value}\nReason: {text}"
+
+
+def not_started_comment(issue: Issue, call_hash: str, reason: str, role: str | None = None) -> str | None:
+    """The not-started comment for the newest receipt, or None when it must not be posted:
+    the newest receipt has no Call: line equal to call_hash (or another role than `role`),
+    has a result of its role or a RESUME after it, or is already not started or stopped."""
+    return _void_comment(issue, "## Launch not started:", role, reason, call_hash)
+
+
+def outage_stop_comment(issue: Issue, role: str, reason: str) -> str | None:
+    """The stop comment for the newest receipt of an agent that an auto mode outage stopped, or None:
+    the newest receipt has no Call: line, has another role than `role`, has a result of its role or
+    a RESUME after it, or is already not started or stopped. The reason (the evidence content)
+    is posted as is: its first line, trailing whitespace kept, cut to REASON_MAX characters."""
+    return _void_comment(issue, "## Launch stopped by outage:", role, reason, verbatim=True)
 
 
 def _two_not_started(issue: Issue) -> bool:
-    """The two newest receipts are both not started, and no result and no RESUME follows the older one."""
+    """The two newest receipts are both voided (not started or stopped by an outage, any mix),
+    and no result and no RESUME follows the older one."""
     raw = _raw_lines(issue)
     receipts = [i for i, line in enumerate(raw) if _launch_role(line)]
     if len(receipts) < 2 or not set(receipts[-2:]) <= _not_started(issue):
@@ -305,6 +352,9 @@ def g1(call: Call, facts: Facts) -> str | None:
         return f"G1: facts are for issue #{iss.number}, expected issue #{call.issue}"
     if not iss.open:
         return f"G1: issue #{iss.number} is closed, expected an open issue"
+    if "waiting" in iss.labels:  # before the ready check: a waiting issue waits, also with ready
+        return (f"G1: issue #{iss.number} has the label waiting, expected no label waiting "
+                f"(the orchestrator adds ready again when the blocker is closed)")
     if "ready" not in iss.labels:
         return f"G1: issue #{iss.number} has no label ready, expected the label ready"
     for label in ("later", "needs-owner"):
@@ -313,8 +363,8 @@ def g1(call: Call, facts: Facts) -> str | None:
     if not facts.clean:
         return "G1: working tree is not clean, expected a clean tree (git status --porcelain empty)"
     if call.role != "close" and _two_not_started(iss):
-        return (f"G1: issue #{iss.number}: the last 2 launches did not start (Claude Code denied them "
-                f"before they ran), expected a launch that starts; stop the loop, the owner posts {RESUME}")
+        return (f"G1: issue #{iss.number}: the last 2 launches did not start or were stopped by an auto mode "
+                f"outage, expected a launch that runs; stop the loop, the owner posts {RESUME}")
     if is_pending(iss):
         lines = _lines(iss)
         j = _newest_launch(lines)
@@ -323,13 +373,45 @@ def g1(call: Call, facts: Facts) -> str | None:
     return None
 
 
+def _waiting_blocker(facts: Facts) -> tuple[int | None, str | None]:
+    """(blocker, None) for a current WAITING result with a usable Waiting on: line, else (None, G2 reason)."""
+    i, _, _ = _current(facts.issue)
+    body = facts.issue.comments[i]
+    n = waiting_on(body)
+    if n is None:
+        count = len({line.rstrip() for line in _unfenced_lines(body) if line.startswith("Waiting on:")})
+        what = "no Waiting on: line" if count == 0 else "Waiting on: lines that disagree or are not #<N>"
+        return None, f"G2: current result is {WAITING} with {what}, expected exactly one line Waiting on: #<N>"
+    if n == facts.issue.number:
+        return None, (f"G2: current result is {WAITING} on #{n}, the issue itself, "
+                      f"expected Waiting on: another issue")
+    return n, None
+
+
+def blocker_to_read(call: Call, facts: Facts) -> int | None:
+    """The issue whose state the guard must read and pass in as facts.blocker_open: only for a PM
+    call whose current result is WAITING with a usable Waiting on: line, and only when G1 allows it."""
+    if call.role != "pm" or _current(facts.issue)[1] != WAITING or g1(call, facts) is not None:
+        return None
+    return _waiting_blocker(facts)[0]
+
+
 def g2(call: Call, facts: Facts) -> str | None:
     lines = _lines(facts.issue)
     _, marker, found = _current(facts.issue)
     if _newest_launch(lines) is None or marker in (BLOCKED, UNVERIFIABLE, RESUME):
         return None
-    return (f"G2: current result is {found}, "
-            f"expected no launch comment yet, {BLOCKED}, {UNVERIFIABLE} or {RESUME}")
+    if marker == WAITING:
+        n, reason = _waiting_blocker(facts)
+        if reason:
+            return reason
+        if facts.blocker_open is None:
+            return f"G2: current result is {WAITING} on #{n}, but the state of #{n} was not read"
+        if facts.blocker_open:
+            return f"G2: current result is {WAITING} on #{n}, and #{n} is open, expected #{n} closed"
+        return None
+    return (f"G2: current result is {found}, expected no launch comment yet, "
+            f"{BLOCKED}, {UNVERIFIABLE}, {RESUME} or {WAITING} with a closed blocker")
 
 
 def g3(call: Call, facts: Facts) -> str | None:

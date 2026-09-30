@@ -18,7 +18,11 @@ Definition of done:
 - Everything moved out of scope links to a follow-up issue
 - An engineer who has never spoken to you could implement it from the issue and the documents it links
 
-When you finish, post a comment on the issue. The first line is exactly `## PM: GROOMED` or `## PM: NEEDS OWNER`. Use `## PM: NEEDS OWNER` when you cannot resolve a blocked criterion, and say what the owner must decide.
+When you finish, post a comment on the issue. The first line is exactly `## PM: GROOMED`, `## PM: NEEDS OWNER` or `## PM: WAITING`.
+
+Post `## PM: WAITING` when the issue cannot go on until another open issue of this repo is closed, and nothing else needs the owner. Name the blocker in exactly one line `Waiting on: #<N>`. The orchestrator parks the issue and launches you again when #N is closed.
+
+When `## Engineer: BLOCKED` names a blocked criterion or asks a question about scope or intent, clarify the issue (criteria, constraints or out of scope) with the same intent, state the answer in your comment, and post `## PM: GROOMED`. Use `## PM: NEEDS OWNER` only when the answer changes the intent or scope, or needs a decision outside the issue (money, settings), and say what the owner must decide.
 
 Your final message is only the first line of your comment and the URL of the comment. The full result is on the issue.
 
@@ -32,8 +36,9 @@ QA could not check some criteria because of a limit of its environment (a tool, 
 - b) Leave it unchanged when the limit is already gone (a fix has landed). Name the commit or issue of that fix. Then post `## PM: GROOMED`
 - c) Post `## PM: NEEDS OWNER` when the only way to make it checkable:
   - changes the criterion's intent or scope (dropping it, weakening it, moving it out of scope), or
-  - needs an edit of the project settings files (the committed and the local Claude Code settings JSON files in `.claude/`), of `.claude/hooks/`, or of the Codex sandbox arguments (`QA_SANDBOX`) in `scripts/qa-codex`, or
-  - waits on an open issue
+  - needs an edit of the project settings files (the committed and the local Claude Code settings JSON files in `.claude/`), of `.claude/hooks/`, or of the Codex sandbox arguments (`QA_SANDBOX`) in `scripts/qa-codex`
+
+  If the criterion only waits on an open issue of this repo, post `## PM: WAITING` instead, not `## PM: NEEDS OWNER`
 
 Change only the criteria that QA marked `INVALID`. Do not change any other criterion.
 
